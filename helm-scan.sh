@@ -1,19 +1,34 @@
 #!/usr/bin/env bash
 # =============================================================================
 # helm-scan.sh — Helm repo bloat & redundancy scanner
-# Usage: ./helm-scan.sh [REPO_ROOT] [--html] [--skip-dep-update]
+# Usage: ./helm-scan.sh [REPO_ROOT] [--html] [--skip-dep-update] [--globals FILE ...]
 #   REPO_ROOT          Path to your helm repo (default: current directory)
 #   --html             Also emit an HTML report (helm-scan-report.html)
 #   --skip-dep-update  Skip 'helm dependency update' (use if deps are pre-vendored)
+#   --globals FILE     Explicit global values file(s) prepended to every helm template call.
+#                      May be repeated: --globals global.yaml --globals env/prod.yaml
+#                      If omitted, the script auto-discovers files matching common patterns.
 # =============================================================================
 set -euo pipefail
 
 REPO_ROOT="${1:-.}"
 EMIT_HTML=false
 SKIP_DEP_UPDATE=false
-for arg in "$@"; do
-  [[ "$arg" == "--html" ]] && EMIT_HTML=true
-  [[ "$arg" == "--skip-dep-update" ]] && SKIP_DEP_UPDATE=true
+EXPLICIT_GLOBALS=() # files passed via --globals
+
+# parse flags (consume --globals FILE pairs; leave other args alone)
+i=1
+while [[ $i -le $# ]]; do
+  arg="${!i}"
+  if [[ "$arg" == "--html" ]]; then
+    EMIT_HTML=true
+  elif [[ "$arg" == "--skip-dep-update" ]]; then
+    SKIP_DEP_UPDATE=true
+  elif [[ "$arg" == "--globals" ]]; then
+    i=$((i + 1))
+    [[ $i -le $# ]] && EXPLICIT_GLOBALS+=("${!i}")
+  fi
+  i=$((i + 1))
 done
 
 # ── colour helpers ────────────────────────────────────────────────────────────
@@ -47,6 +62,67 @@ WARN_RATIO=80                     # % of limit that triggers a warning
 # ── accumulator for HTML ──────────────────────────────────────────────────────
 HTML_SECTIONS=()
 html_section() { HTML_SECTIONS+=("$1"); }
+
+# =============================================================================
+# 0. GLOBAL VALUES RESOLUTION
+# =============================================================================
+# Common naming patterns for repo-wide / environment global values files.
+# Searched at REPO_ROOT and one level deep. Chart-local values.yaml files are
+# excluded here — they are picked up per-chart in section 2.
+GLOBAL_PATTERNS=(
+  "global.yaml"
+  "global-values.yaml"
+  "globals.yaml"
+  "values-global.yaml"
+  "values.global.yaml"
+  "common.yaml"
+  "common-values.yaml"
+  "env.yaml"
+  "env-values.yaml"
+  "values-env.yaml"
+  "base.yaml"
+  "base-values.yaml"
+  "shared.yaml"
+  "shared-values.yaml"
+  "defaults.yaml"
+)
+
+GLOBAL_VALUES_FLAGS=() # -f flags prepended to every helm template call
+
+if [[ ${#EXPLICIT_GLOBALS[@]} -gt 0 ]]; then
+  # User supplied explicit files — trust them, skip auto-discovery
+  for gf in "${EXPLICIT_GLOBALS[@]}"; do
+    if [[ -f "$gf" ]]; then
+      GLOBAL_VALUES_FLAGS+=(-f "$gf")
+    else
+      printf "${YEL}  WARNING: --globals file not found: %s${RST}\n" "$gf"
+    fi
+  done
+else
+  # Auto-discover: search REPO_ROOT and one level of subdirectories
+  for pattern in "${GLOBAL_PATTERNS[@]}"; do
+    while IFS= read -r found; do
+      # Skip files that live inside a chart directory (they have a sibling Chart.yaml)
+      found_dir=$(dirname "$found")
+      if [[ ! -f "$found_dir/Chart.yaml" ]]; then
+        GLOBAL_VALUES_FLAGS+=(-f "$found")
+      fi
+    done < <(find "$REPO_ROOT" -maxdepth 2 -name "$pattern" 2>/dev/null | sort)
+  done
+fi
+
+# Print what we found
+hdr "0 · Global values files"
+if [[ ${#GLOBAL_VALUES_FLAGS[@]} -eq 0 ]]; then
+  printf "  ${YEL}None found.${RST} If templates use .Values.global.* you will get nil pointer\n"
+  printf "  errors. Pass explicit files with:  --globals path/to/global.yaml\n"
+else
+  printf "  Will prepend to every helm template call:\n"
+  for flag in "${GLOBAL_VALUES_FLAGS[@]}"; do
+    [[ "$flag" == "-f" ]] && continue
+    printf "    ${GRN}%s${RST}\n" "$flag"
+  done
+fi
 
 # ── helper: bytes → human ─────────────────────────────────────────────────────
 human() {
@@ -133,7 +209,8 @@ for c in "${CHARTS[@]}"; do
     fi
   fi
 
-  if helm template "scan-release" "$chart_dir" "${VALUES_FLAGS[@]}" \
+  if helm template "scan-release" "$chart_dir" \
+    "${GLOBAL_VALUES_FLAGS[@]}" "${VALUES_FLAGS[@]}" \
     --include-crds 2>/dev/null >"$TMP_RENDER"; then
     size=$(wc -c <"$TMP_RENDER")
     pct=$((size * 100 / HELM_LIMIT))
@@ -152,7 +229,8 @@ for c in "${CHARTS[@]}"; do
     SIZE_ROWS+="<tr class='$(echo $tag | tr ' ' '-' | tr '[:upper:]' '[:lower:]')'>"
     SIZE_ROWS+="<td>$name</td><td>$h</td><td>$pct%</td><td>$tag</td></tr>"
   else
-    render_err=$(helm template "scan-release" "$chart_dir" "${VALUES_FLAGS[@]}" \
+    render_err=$(helm template "scan-release" "$chart_dir" \
+      "${GLOBAL_VALUES_FLAGS[@]}" "${VALUES_FLAGS[@]}" \
       --include-crds 2>&1 | head -6 || true)
     printf "  ${RED}%-40s  render failed${RST}\n" "$name"
     echo "$render_err" | sed 's/^/    /'
