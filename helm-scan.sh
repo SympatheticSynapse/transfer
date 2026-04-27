@@ -159,16 +159,37 @@ for c in "${CHARTS[@]}"; do
   chart_dir=$(dirname "$c")
   name=$(yq '.name' "$c" 2>/dev/null || basename "$chart_dir")
   kind=$(yq '.type // "application"' "$c" 2>/dev/null)
-  CHART_TABLE+="<tr><td>$name</td><td>$chart_dir</td><td>$kind</td></tr>"
+  ver=$(yq '.version // "—"' "$c" 2>/dev/null)
+  app_ver=$(yq '.appVersion // "—"' "$c" 2>/dev/null)
+  dep_count=$(yq '.dependencies | length' "$c" 2>/dev/null || echo "0")
+  kind_badge="<span class='badge info'>$kind</span>"
+  [[ "$kind" == "library" ]] && kind_badge="<span class='badge muted'>$kind</span>"
+  CHART_TABLE+="<tr data-status='ok'><td>$name</td><td style='color:var(--muted)'>$chart_dir</td><td>$kind_badge</td><td>$ver</td><td>$app_ver</td><td>${dep_count:-0}</td></tr>"
 done
 
 html_section "
-<section>
-  <h2>1 · Charts Discovered</h2>
-  <table>
-    <thead><tr><th>Name</th><th>Path</th><th>Type</th></tr></thead>
-    <tbody>$CHART_TABLE</tbody>
-  </table>
+<section id='sec1'>
+  <div class='section-header'>
+    <span class='section-num'>1</span>
+    <h2>Charts Discovered</h2>
+    <span class='collapse-icon'>▶</span>
+  </div>
+  <div class='section-desc'>All <code>Chart.yaml</code> files found in the repo (excluding vendored <code>charts/</code> subdirectories).</div>
+  <div class='section-body'>
+    <div class='table-wrap'>
+      <table id='tbl1'>
+        <thead><tr>
+          <th data-col='0'>Name<span class='sort-icon'></span></th>
+          <th data-col='1'>Path<span class='sort-icon'></span></th>
+          <th data-col='2'>Type<span class='sort-icon'></span></th>
+          <th data-col='3'>Version<span class='sort-icon'></span></th>
+          <th data-col='4'>App Version<span class='sort-icon'></span></th>
+          <th data-col='5'>Dependencies<span class='sort-icon'></span></th>
+        </tr></thead>
+        <tbody>$CHART_TABLE</tbody>
+      </table>
+    </div>
+  </div>
 </section>"
 
 # =============================================================================
@@ -640,6 +661,47 @@ echo "  Warn threshold : ${WARN_RATIO}% of limit"
 # HTML REPORT
 # =============================================================================
 if [[ "$EMIT_HTML" == true ]]; then
+
+  # ── compute summary counts for the dashboard ────────────────────────────────
+  TOTAL_CHARTS=${#CHARTS[@]}
+  OVER_LIMIT_COUNT=0
+  WARN_COUNT=0
+  OK_COUNT=0
+  SECRET_WARN_COUNT=0
+  MISSING_IGNORE_COUNT=0
+
+  for c in "${CHARTS[@]}"; do
+    chart_dir=$(dirname "$c")
+    TMP_RENDER="${CHART_RENDER_PATH[$chart_dir]:-}"
+    if [[ -n "$TMP_RENDER" && -s "$TMP_RENDER" ]]; then
+      sz=$(wc -c <"$TMP_RENDER")
+      pct=$((sz * 100 / HELM_LIMIT))
+      if ((sz > HELM_LIMIT)); then
+        ((OVER_LIMIT_COUNT++))
+      elif ((pct > WARN_RATIO)); then
+        ((WARN_COUNT++))
+      else
+        ((OK_COUNT++))
+      fi
+      # check for large secrets
+      secret_issues=$(python3 -c "
+import sys, yaml, json
+try:
+    with open('$TMP_RENDER') as f:
+        docs = [d for d in yaml.safe_load_all(f.read().replace('\t','  ')) if d]
+    count = sum(1 for d in docs if d.get('kind')=='Secret' and len(json.dumps(d).encode()) > int($SECRET_LIMIT * $WARN_RATIO / 100))
+    print(count)
+except: print(0)
+" 2>/dev/null || echo 0)
+      ((SECRET_WARN_COUNT += secret_issues))
+    else
+      ((OVER_LIMIT_COUNT++))
+    fi
+    [[ ! -f "$chart_dir/.helmignore" ]] && ((MISSING_IGNORE_COUNT++))
+  done
+
+  TOTAL_ISSUES=$((OVER_LIMIT_COUNT + WARN_COUNT + SECRET_WARN_COUNT + MISSING_IGNORE_COUNT))
+
   {
     cat <<'HTML_HEAD'
 <!DOCTYPE html>
@@ -649,45 +711,435 @@ if [[ "$EMIT_HTML" == true ]]; then
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Helm Repo Scan Report</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
   :root {
-    --bg: #0d1117; --surface: #161b22; --border: #30363d;
-    --text: #c9d1d9; --muted: #8b949e;
-    --red: #f85149; --yellow: #d29922; --green: #3fb950; --blue: #58a6ff;
-    --font-mono: 'IBM Plex Mono', monospace;
-    --font-sans: 'IBM Plex Sans', sans-serif;
+    --bg:        #090c10;
+    --surface:   #0d1117;
+    --surface2:  #161b22;
+    --surface3:  #1c2128;
+    --border:    #30363d;
+    --border2:   #21262d;
+    --text:      #e6edf3;
+    --muted:     #7d8590;
+    --muted2:    #484f58;
+    --red:       #f85149;
+    --red-dim:   rgba(248,81,73,.12);
+    --yellow:    #e3b341;
+    --yellow-dim:rgba(227,179,65,.12);
+    --green:     #3fb950;
+    --green-dim: rgba(63,185,80,.12);
+    --blue:      #58a6ff;
+    --blue-dim:  rgba(88,166,255,.1);
+    --purple:    #bc8cff;
+    --nav-w:     220px;
+    --font:      'Inter', system-ui, sans-serif;
+    --mono:      'JetBrains Mono', 'Fira Code', monospace;
+    --radius:    6px;
   }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: var(--font-sans);
-         font-size: 14px; line-height: 1.6; padding: 2rem; }
-  h1 { font-size: 1.6rem; font-weight: 600; color: var(--blue); margin-bottom: .25rem; }
-  .subtitle { color: var(--muted); font-size: .85rem; margin-bottom: 2.5rem; font-family: var(--font-mono); }
-  h2 { font-size: 1rem; font-weight: 600; color: var(--blue); margin: 2rem 0 .75rem;
-       padding-bottom: .4rem; border-bottom: 1px solid var(--border); }
-  section { margin-bottom: 2rem; }
-  table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: .8rem; }
-  th { background: var(--surface); color: var(--muted); text-align: left;
-       padding: .5rem .75rem; border: 1px solid var(--border); font-weight: 600; }
-  td { padding: .45rem .75rem; border: 1px solid var(--border); vertical-align: top; word-break: break-word; }
-  tr:nth-child(even) td { background: rgba(255,255,255,.02); }
-  tr.over-limit td, tr.over-limit td { color: var(--red); }
-  tr.warning td { color: var(--yellow); }
-  tr.ok td { color: var(--green); }
-  tr.error td { color: var(--muted); font-style: italic; }
-  p { color: var(--muted); margin: .5rem 0; font-size: .85rem; }
-  code { background: var(--surface); border: 1px solid var(--border); border-radius: 3px;
-         padding: .1rem .4rem; font-family: var(--font-mono); font-size: .8rem; }
-  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
-        padding: 1rem; font-family: var(--font-mono); font-size: .78rem;
-        overflow-x: auto; color: var(--muted); }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 13px;
+    line-height: 1.6;
+    display: flex;
+    min-height: 100vh;
+  }
+
+  /* ── NAV ── */
+  nav {
+    position: fixed; top: 0; left: 0; bottom: 0;
+    width: var(--nav-w);
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    overflow-y: auto; z-index: 100;
+    padding-bottom: 2rem;
+  }
+  .nav-header {
+    padding: 1.25rem 1rem 1rem;
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0;
+    background: var(--surface);
+    z-index: 1;
+  }
+  .nav-header .logo { font-size: 1.1rem; font-weight: 600; color: var(--blue); letter-spacing: -.01em; }
+  .nav-header .repo { font-family: var(--mono); font-size: .68rem; color: var(--muted); margin-top: .2rem;
+                      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nav-section-label {
+    font-size: .65rem; font-weight: 600; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted2); padding: 1.1rem 1rem .3rem;
+  }
+  nav a {
+    display: flex; align-items: center; gap: .5rem;
+    padding: .38rem 1rem; text-decoration: none;
+    color: var(--muted); font-size: .8rem;
+    border-left: 2px solid transparent;
+    transition: all .15s;
+  }
+  nav a:hover { color: var(--text); background: var(--surface2); }
+  nav a.active { color: var(--blue); border-left-color: var(--blue); background: var(--blue-dim); }
+  nav a .nav-badge {
+    margin-left: auto; font-size: .65rem; font-family: var(--mono);
+    padding: .1rem .35rem; border-radius: 99px;
+  }
+  nav a .nav-badge.err  { background: var(--red-dim);    color: var(--red); }
+  nav a .nav-badge.warn { background: var(--yellow-dim); color: var(--yellow); }
+  nav a .nav-badge.ok   { background: var(--green-dim);  color: var(--green); }
+
+  /* ── MAIN ── */
+  main {
+    margin-left: var(--nav-w);
+    flex: 1;
+    padding: 2rem 2.5rem;
+    max-width: 1100px;
+  }
+
+  /* ── PAGE HEADER ── */
+  .page-header { margin-bottom: 2rem; }
+  .page-header h1 { font-size: 1.4rem; font-weight: 600; color: var(--text); letter-spacing: -.02em; }
+  .page-header .meta {
+    font-family: var(--mono); font-size: .72rem; color: var(--muted); margin-top: .3rem;
+    display: flex; gap: 1.5rem;
+  }
+  .page-header .meta span::before { content: ''; }
+
+  /* ── DASHBOARD CARDS ── */
+  .dashboard {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: .75rem;
+    margin-bottom: 2.5rem;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem;
+    display: flex; flex-direction: column; gap: .3rem;
+  }
+  .card .card-label { font-size: .7rem; color: var(--muted); text-transform: uppercase;
+                      letter-spacing: .06em; font-weight: 500; }
+  .card .card-value { font-size: 2rem; font-weight: 600; line-height: 1; font-family: var(--mono); }
+  .card .card-sub   { font-size: .7rem; color: var(--muted); }
+  .card.red    { border-color: var(--red);    background: var(--red-dim); }
+  .card.yellow { border-color: var(--yellow); background: var(--yellow-dim); }
+  .card.green  { border-color: var(--green);  background: var(--green-dim); }
+  .card.blue   { border-color: var(--blue);   background: var(--blue-dim); }
+  .card.red    .card-value { color: var(--red); }
+  .card.yellow .card-value { color: var(--yellow); }
+  .card.green  .card-value { color: var(--green); }
+  .card.blue   .card-value { color: var(--blue); }
+
+  /* ── SECTIONS ── */
+  section { margin-bottom: 3rem; scroll-margin-top: 1.5rem; }
+  .section-header {
+    display: flex; align-items: center; gap: .75rem;
+    margin-bottom: 1rem; cursor: pointer; user-select: none;
+  }
+  .section-header h2 {
+    font-size: .95rem; font-weight: 600; color: var(--text);
+    flex: 1;
+  }
+  .section-header .section-num {
+    font-family: var(--mono); font-size: .7rem; color: var(--muted);
+    background: var(--surface2); border: 1px solid var(--border);
+    padding: .15rem .5rem; border-radius: 99px;
+  }
+  .section-header .collapse-icon {
+    font-size: .75rem; color: var(--muted); transition: transform .2s;
+  }
+  .section-header .collapse-icon.open { transform: rotate(90deg); }
+  .section-desc {
+    font-size: .78rem; color: var(--muted); margin-bottom: .85rem; line-height: 1.5;
+    padding: .6rem .85rem;
+    background: var(--surface2); border-left: 3px solid var(--border);
+    border-radius: 0 var(--radius) var(--radius) 0;
+  }
+  .section-desc strong { color: var(--text); }
+  .section-body { overflow: hidden; }
+
+  /* ── TABLES ── */
+  .table-wrap { overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .76rem; }
+  thead { position: sticky; top: 0; z-index: 2; }
+  th {
+    background: var(--surface2); color: var(--muted);
+    padding: .5rem .85rem; text-align: left;
+    border-bottom: 1px solid var(--border); font-weight: 500;
+    font-size: .7rem; text-transform: uppercase; letter-spacing: .05em;
+    cursor: pointer; white-space: nowrap; user-select: none;
+  }
+  th:hover { color: var(--text); }
+  th .sort-icon { margin-left: .3rem; opacity: .4; }
+  th.sorted-asc  .sort-icon::after { content: ' ▲'; opacity: 1; }
+  th.sorted-desc .sort-icon::after { content: ' ▼'; opacity: 1; }
+  th:not(.sorted-asc):not(.sorted-desc) .sort-icon::after { content: ' ⇅'; }
+  td {
+    padding: .45rem .85rem; border-bottom: 1px solid var(--border2);
+    vertical-align: middle; color: var(--text);
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--surface2); }
+
+  /* row status colours */
+  tr.over-limit td:first-child { border-left: 3px solid var(--red); }
+  tr.warning    td:first-child { border-left: 3px solid var(--yellow); }
+  tr.ok         td:first-child { border-left: 3px solid var(--green); }
+  tr.error      td:first-child { border-left: 3px solid var(--muted2); }
+
+  /* ── BADGES ── */
+  .badge {
+    display: inline-flex; align-items: center;
+    padding: .15rem .5rem; border-radius: 99px;
+    font-size: .68rem; font-weight: 500; font-family: var(--mono);
+    white-space: nowrap;
+  }
+  .badge.err  { background: var(--red-dim);    color: var(--red);    border: 1px solid var(--red); }
+  .badge.warn { background: var(--yellow-dim); color: var(--yellow); border: 1px solid var(--yellow); }
+  .badge.ok   { background: var(--green-dim);  color: var(--green);  border: 1px solid var(--green); }
+  .badge.info { background: var(--blue-dim);   color: var(--blue);   border: 1px solid var(--blue); }
+  .badge.muted{ background: var(--surface3);   color: var(--muted);  border: 1px solid var(--border); }
+
+  /* ── PROGRESS BAR ── */
+  .bar-wrap { display: flex; align-items: center; gap: .6rem; min-width: 140px; }
+  .bar-track {
+    flex: 1; height: 6px; background: var(--surface3);
+    border-radius: 99px; overflow: hidden;
+  }
+  .bar-fill { height: 100%; border-radius: 99px; transition: width .3s; }
+  .bar-fill.ok   { background: var(--green); }
+  .bar-fill.warn { background: var(--yellow); }
+  .bar-fill.err  { background: var(--red); }
+  .bar-label { font-size: .7rem; color: var(--muted); white-space: nowrap; }
+
+  /* ── FILTER BAR ── */
+  .filter-bar {
+    display: flex; gap: .5rem; margin-bottom: .75rem; flex-wrap: wrap; align-items: center;
+  }
+  .filter-bar input[type=search] {
+    background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text); font-family: var(--mono); font-size: .76rem;
+    padding: .35rem .7rem; border-radius: var(--radius); outline: none;
+    width: 220px;
+  }
+  .filter-bar input[type=search]:focus { border-color: var(--blue); }
+  .filter-btn {
+    background: var(--surface2); border: 1px solid var(--border);
+    color: var(--muted); font-size: .72rem; padding: .3rem .7rem;
+    border-radius: var(--radius); cursor: pointer; font-family: var(--font);
+  }
+  .filter-btn:hover { color: var(--text); border-color: var(--muted); }
+  .filter-btn.active { color: var(--blue); border-color: var(--blue); background: var(--blue-dim); }
+  .row-count { font-size: .7rem; color: var(--muted); margin-left: auto; }
+
+  /* ── TIPS BOX ── */
+  .tip-box {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: .85rem 1rem;
+    margin-top: .85rem;
+  }
+  .tip-box .tip-title { font-size: .72rem; font-weight: 600; color: var(--blue);
+                        text-transform: uppercase; letter-spacing: .06em; margin-bottom: .5rem; }
+  .tip-box ul { padding-left: 1.2rem; }
+  .tip-box li { font-size: .77rem; color: var(--muted); line-height: 1.7; }
+  .tip-box li strong { color: var(--text); }
+  .tip-box code {
+    background: var(--surface3); border: 1px solid var(--border);
+    border-radius: 3px; padding: .1rem .35rem;
+    font-family: var(--mono); font-size: .72rem; color: var(--purple);
+  }
+
+  /* ── SCROLLBAR ── */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--surface); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--muted2); }
+
+  /* ── EMPTY STATE ── */
+  .empty { text-align: center; padding: 2rem; color: var(--muted); font-size: .82rem; }
+
+  /* ── TOOLTIP ── */
+  [data-tip] { position: relative; cursor: help; }
+  [data-tip]::after {
+    content: attr(data-tip);
+    position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+    background: var(--surface3); border: 1px solid var(--border);
+    color: var(--text); font-size: .7rem; padding: .3rem .6rem;
+    border-radius: var(--radius); white-space: nowrap; pointer-events: none;
+    opacity: 0; transition: opacity .15s; z-index: 999;
+  }
+  [data-tip]:hover::after { opacity: 1; }
 </style>
 </head>
 <body>
-<h1>⎈ Helm Repo Scan</h1>
 HTML_HEAD
-    echo "<p class='subtitle'>Generated: $(date -u '+%Y-%m-%d %H:%M UTC') · Repo: $REPO_ROOT</p>"
+
+    # ── NAV ────────────────────────────────────────────────────────────────────
+    cat <<NAVEOF
+<nav>
+  <div class="nav-header">
+    <div class="logo">⎈ Helm Scan</div>
+    <div class="repo">$REPO_ROOT</div>
+  </div>
+  <div class="nav-section-label">Overview</div>
+  <a href="#dashboard">Dashboard</a>
+  <div class="nav-section-label">Sections</div>
+  <a href="#sec0">0 · Global Values</a>
+  <a href="#sec1">1 · Charts</a>
+  <a href="#sec2">2 · Rendered Sizes</a>
+  <a href="#sec3">3 · Largest Resources</a>
+  <a href="#sec4">4 · Redundant Values</a>
+  <a href="#sec5">5 · Unused Values</a>
+  <a href="#sec6">6 · Cross-chart Dupes</a>
+  <a href="#sec7">7 · Dir Sizes</a>
+  <a href="#sec8">8 · .helmignore</a>
+</nav>
+NAVEOF
+
+    # ── PAGE HEADER + DASHBOARD ────────────────────────────────────────────────
+    echo "<main>"
+    echo "<div class='page-header'>"
+    echo "  <h1>Helm Repository Scan Report</h1>"
+    echo "  <div class='meta'>"
+    echo "    <span>Generated: $(date -u '+%Y-%m-%d %H:%M UTC')</span>"
+    echo "    <span>Repo: <code style='font-family:var(--mono);font-size:.72rem;color:var(--purple)'>$REPO_ROOT</code></span>"
+    echo "    <span>Charts: $TOTAL_CHARTS</span>"
+    echo "  </div>"
+    echo "</div>"
+
+    # dashboard cards
+    echo "<div id='dashboard' class='dashboard'>"
+    echo "  <div class='card blue'><div class='card-label'>Charts Scanned</div><div class='card-value'>$TOTAL_CHARTS</div><div class='card-sub'>in repo</div></div>"
+
+    if ((OVER_LIMIT_COUNT > 0)); then
+      echo "  <div class='card red'><div class='card-label'>Over Limit</div><div class='card-value'>$OVER_LIMIT_COUNT</div><div class='card-sub'>exceed 5 MB</div></div>"
+    else
+      echo "  <div class='card green'><div class='card-label'>Over Limit</div><div class='card-value'>0</div><div class='card-sub'>none exceed 5 MB</div></div>"
+    fi
+
+    if ((WARN_COUNT > 0)); then
+      echo "  <div class='card yellow'><div class='card-label'>Near Limit</div><div class='card-value'>$WARN_COUNT</div><div class='card-sub'>&gt;${WARN_RATIO}% of 5 MB</div></div>"
+    else
+      echo "  <div class='card green'><div class='card-label'>Near Limit</div><div class='card-value'>0</div><div class='card-sub'>all under ${WARN_RATIO}%</div></div>"
+    fi
+
+    if ((SECRET_WARN_COUNT > 0)); then
+      echo "  <div class='card red'><div class='card-label'>Secret Issues</div><div class='card-value'>$SECRET_WARN_COUNT</div><div class='card-sub'>near/over 1 MB</div></div>"
+    else
+      echo "  <div class='card green'><div class='card-label'>Secret Issues</div><div class='card-value'>0</div><div class='card-sub'>all secrets ok</div></div>"
+    fi
+
+    if ((MISSING_IGNORE_COUNT > 0)); then
+      echo "  <div class='card yellow'><div class='card-label'>Missing .helmignore</div><div class='card-value'>$MISSING_IGNORE_COUNT</div><div class='card-sub'>charts affected</div></div>"
+    else
+      echo "  <div class='card green'><div class='card-label'>Missing .helmignore</div><div class='card-value'>0</div><div class='card-sub'>all charts covered</div></div>"
+    fi
+
+    echo "  <div class='card'><div class='card-label'>Total Issues</div><div class='card-value' style='color:var(--text)'>$TOTAL_ISSUES</div><div class='card-sub'>across all checks</div></div>"
+    echo "</div>"
+
+    # ── SECTIONS ───────────────────────────────────────────────────────────────
     for section in "${HTML_SECTIONS[@]}"; do echo "$section"; done
-    echo "</body></html>"
+
+    cat <<'HTML_FOOT'
+</main>
+
+<script>
+// ── Active nav link on scroll ──────────────────────────────────────────────
+const sections = document.querySelectorAll('section[id]');
+const navLinks  = document.querySelectorAll('nav a[href^="#"]');
+const observer  = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      navLinks.forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + e.target.id));
+    }
+  });
+}, { rootMargin: '-20% 0px -70% 0px' });
+sections.forEach(s => observer.observe(s));
+
+// ── Collapsible sections ───────────────────────────────────────────────────
+document.querySelectorAll('.section-header').forEach(hdr => {
+  const body = hdr.nextElementSibling?.classList.contains('section-desc')
+    ? hdr.nextElementSibling.nextElementSibling
+    : hdr.nextElementSibling;
+  const icon = hdr.querySelector('.collapse-icon');
+  if (!body) return;
+  icon.classList.add('open');
+  hdr.addEventListener('click', () => {
+    const open = icon.classList.toggle('open');
+    body.style.display = open ? '' : 'none';
+    if (hdr.nextElementSibling?.classList.contains('section-desc'))
+      hdr.nextElementSibling.style.display = open ? '' : 'none';
+  });
+});
+
+// ── Sortable tables ────────────────────────────────────────────────────────
+document.querySelectorAll('th[data-col]').forEach(th => {
+  th.innerHTML += '<span class="sort-icon"></span>';
+  th.addEventListener('click', () => {
+    const table = th.closest('table');
+    const tbody = table.querySelector('tbody');
+    const col   = parseInt(th.dataset.col);
+    const asc   = !th.classList.contains('sorted-asc');
+    table.querySelectorAll('th').forEach(t => t.classList.remove('sorted-asc','sorted-desc'));
+    th.classList.add(asc ? 'sorted-asc' : 'sorted-desc');
+    const rows = [...tbody.querySelectorAll('tr')];
+    rows.sort((a, b) => {
+      const av = a.cells[col]?.dataset.val ?? a.cells[col]?.textContent ?? '';
+      const bv = b.cells[col]?.dataset.val ?? b.cells[col]?.textContent ?? '';
+      const an = parseFloat(av), bn = parseFloat(bv);
+      return (isNaN(an) || isNaN(bn))
+        ? (asc ? av.localeCompare(bv) : bv.localeCompare(av))
+        : (asc ? an - bn : bn - an);
+    });
+    rows.forEach(r => tbody.appendChild(r));
+  });
+});
+
+// ── Per-table search + status filter ──────────────────────────────────────
+document.querySelectorAll('.filter-bar').forEach(bar => {
+  const tableId = bar.dataset.table;
+  const tbody   = document.querySelector(`#${tableId} tbody`);
+  if (!tbody) return;
+  const countEl = bar.querySelector('.row-count');
+  const search  = bar.querySelector('input[type=search]');
+  const btns    = bar.querySelectorAll('.filter-btn[data-status]');
+  let activeStatus = 'all';
+
+  function applyFilters() {
+    const q = search?.value.toLowerCase() ?? '';
+    let visible = 0;
+    tbody.querySelectorAll('tr').forEach(row => {
+      const text   = row.textContent.toLowerCase();
+      const status = row.dataset.status ?? '';
+      const matchQ = !q || text.includes(q);
+      const matchS = activeStatus === 'all' || status === activeStatus;
+      row.style.display = matchQ && matchS ? '' : 'none';
+      if (matchQ && matchS) visible++;
+    });
+    if (countEl) countEl.textContent = `${visible} row${visible !== 1 ? 's' : ''}`;
+  }
+
+  search?.addEventListener('input', applyFilters);
+  btns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      btns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeStatus = btn.dataset.status;
+      applyFilters();
+    });
+  });
+  applyFilters();
+});
+</script>
+</body></html>
+HTML_FOOT
+
   } >helm-scan-report.html
   echo
   echo "  → HTML report written to: helm-scan-report.html"
