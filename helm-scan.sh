@@ -167,6 +167,31 @@ for c in "${CHARTS[@]}"; do
   CHART_TABLE+="<tr data-status='ok'><td>$name</td><td style='color:var(--muted)'>$chart_dir</td><td>$kind_badge</td><td>$ver</td><td>$app_ver</td><td>${dep_count:-0}</td></tr>"
 done
 
+GLOBAL_HTML_ROWS=""
+for flag in "${GLOBAL_VALUES_FLAGS[@]}"; do
+  [[ "$flag" == "-f" ]] && continue
+  GLOBAL_HTML_ROWS+="<tr data-status='ok'><td><span class='badge ok'>auto</span></td><td style='font-family:var(--mono);font-size:.75rem'>$flag</td></tr>"
+done
+[[ -z "$GLOBAL_HTML_ROWS" ]] && GLOBAL_HTML_ROWS="<tr><td colspan='2'><span class='badge warn'>None found</span> &nbsp;nil pointer errors likely if templates reference <code>.Values.global.*</code></td></tr>"
+
+html_section "
+<section id='sec0'>
+  <div class='section-header'>
+    <span class='section-num'>0</span>
+    <h2>Global Values Files</h2>
+    <span class='collapse-icon'>▶</span>
+  </div>
+  <div class='section-desc'>Files prepended to every <code>helm template</code> call. If missing, templates referencing <code>.Values.global.*</code> will produce nil pointer errors. Pass explicit files with <code>--globals path/to/global.yaml</code>.</div>
+  <div class='section-body'>
+    <div class='table-wrap'>
+      <table id='tbl0'>
+        <thead><tr><th>Source</th><th>Path</th></tr></thead>
+        <tbody>$GLOBAL_HTML_ROWS</tbody>
+      </table>
+    </div>
+  </div>
+</section>"
+
 html_section "
 <section id='sec1'>
   <div class='section-header'>
@@ -247,8 +272,16 @@ for c in "${CHARTS[@]}"; do
 
     printf "  ${col}%-40s  %8s  (%3d%% of 5 MB)  %s${RST}\n" \
       "$name" "$h" "$pct" "$tag"
-    SIZE_ROWS+="<tr class='$(echo $tag | tr ' ' '-' | tr '[:upper:]' '[:lower:]')'>"
-    SIZE_ROWS+="<td>$name</td><td>$h</td><td>$pct%</td><td>$tag</td></tr>"
+    SIZE_ROWS+="<tr class='$(echo $tag | tr ' ' '-' | tr '[:upper:]' '[:lower:]')' data-status='$(echo $tag | tr ' ' '-' | tr '[:upper:]' '[:lower:]')'>"
+    bar_cls="ok"
+    [[ "$tag" == "WARNING" ]] && bar_cls="warn"
+    [[ "$tag" == "OVER LIMIT" ]] && bar_cls="err"
+    badge_cls="ok"
+    [[ "$tag" == "WARNING" ]] && badge_cls="warn"
+    [[ "$tag" == "OVER LIMIT" ]] && badge_cls="err"
+    SIZE_ROWS+="<td>$name</td><td data-val='$size'>$h</td>"
+    SIZE_ROWS+="<td><div class='bar-wrap'><div class='bar-track'><div class='bar-fill $bar_cls' style='width:${pct}%'></div></div><span class='bar-label'>$pct%</span></div></td>"
+    SIZE_ROWS+="<td><span class='badge $badge_cls'>$tag</span></td></tr>"
   else
     render_err=$(helm template "scan-release" "$chart_dir" \
       "${GLOBAL_VALUES_FLAGS[@]}" "${VALUES_FLAGS[@]}" \
@@ -260,13 +293,43 @@ for c in "${CHARTS[@]}"; do
 done
 
 html_section "
-<section>
-  <h2>2 · Rendered Manifest Sizes</h2>
-  <p>Helm limit: 5 MB. Warning threshold: ${WARN_RATIO}%.</p>
-  <table>
-    <thead><tr><th>Chart</th><th>Size</th><th>% of limit</th><th>Status</th></tr></thead>
-    <tbody>$SIZE_ROWS</tbody>
-  </table>
+<section id='sec2'>
+  <div class='section-header'>
+    <span class='section-num'>2</span>
+    <h2>Rendered Manifest Sizes</h2>
+    <span class='collapse-icon'>▶</span>
+  </div>
+  <div class='section-desc'>Output of <code>helm template</code> per chart. <strong>Hard limit: 5 MB.</strong> Warning at ${WARN_RATIO}%. Render failures usually mean missing dependencies or globals.</div>
+  <div class='section-body'>
+    <div class='filter-bar' data-table='tbl2'>
+      <input type='search' placeholder='Filter charts…'>
+      <button class='filter-btn active' data-status='all'>All</button>
+      <button class='filter-btn' data-status='over-limit'>Over Limit</button>
+      <button class='filter-btn' data-status='warning'>Warning</button>
+      <button class='filter-btn' data-status='ok'>OK</button>
+      <button class='filter-btn' data-status='error'>Failed</button>
+      <span class='row-count'></span>
+    </div>
+    <div class='table-wrap'>
+      <table id='tbl2'>
+        <thead><tr>
+          <th data-col='0'>Chart<span class='sort-icon'></span></th>
+          <th data-col='1'>Rendered Size<span class='sort-icon'></span></th>
+          <th data-col='2'>% of 5 MB limit<span class='sort-icon'></span></th>
+          <th data-col='3'>Status<span class='sort-icon'></span></th>
+        </tr></thead>
+        <tbody>$SIZE_ROWS</tbody>
+      </table>
+    </div>
+    <div class='tip-box'>
+      <div class='tip-title'>💡 Remediation</div>
+      <ul>
+        <li><strong>Over limit:</strong> Split the umbrella chart by domain, or extract large ConfigMaps/Secrets to raw manifests managed by GitOps.</li>
+        <li><strong>Render failed:</strong> Check missing <code>--globals</code> files (nil pointer) or run <code>helm dependency update</code> for missing sub-charts.</li>
+        <li><strong>Near limit:</strong> Trim redundant values (see §4) and add <code>.helmignore</code> (see §8).</li>
+      </ul>
+    </div>
+  </div>
 </section>"
 
 # =============================================================================
@@ -323,7 +386,9 @@ for sz, kind, ns, nm in rows[:15]:
         elif pct > warn_ratio:     flag = f"  ⚠ SECRET large ({pct}% of 1 MB)"
     print(f"    {h:>10}  {kind:<20} {label}{flag}")
     css = "over-limit" if "OVER" in flag else ("warning" if "⚠" in flag else "")
-    html_rows += f"<tr class='{css}'><td>{chart_name}</td><td>{kind}</td><td>{label}</td><td>{h}</td><td>{flag.strip()}</td></tr>"
+    status = "over-limit" if "OVER" in flag else ("warning" if "⚠" in flag else "ok")
+    flag_html = f"<span class='badge err'>{flag.strip()}</span>" if "OVER" in flag else (f"<span class='badge warn'>{flag.strip()}</span>" if flag.strip() else "")
+    html_rows += f"<tr class='{css}' data-status='{status}'><td>{chart_name}</td><td><span class='badge muted'>{kind}</span></td><td style='font-family:var(--mono);font-size:.75rem'>{label}</td><td data-val='{sz}'>{h}</td><td>{flag_html}</td></tr>"
 
 # write partial HTML to stdout marker
 print(f"__HTML_ROWS__{html_rows}__END_HTML_ROWS__")
@@ -336,12 +401,41 @@ RES_ROWS=$(grep -oP '(?<=__HTML_ROWS__).*(?=__END_HTML_ROWS__)' \
   /tmp/helm-scan-res-raw.txt | tr -d '\n' || true)
 
 html_section "
-<section>
-  <h2>3 · Largest Rendered Resources</h2>
-  <table>
-    <thead><tr><th>Chart</th><th>Kind</th><th>Name</th><th>Size</th><th>Flag</th></tr></thead>
-    <tbody>$RES_ROWS</tbody>
-  </table>
+<section id='sec3'>
+  <div class='section-header'>
+    <span class='section-num'>3</span>
+    <h2>Largest Rendered Resources</h2>
+    <span class='collapse-icon'>▶</span>
+  </div>
+  <div class='section-desc'>Top 15 resources by JSON-serialized size per chart. Secrets over <strong>1 MB</strong> will be rejected by Kubernetes. Secrets over <strong>${WARN_RATIO}% of 1 MB</strong> are flagged.</div>
+  <div class='section-body'>
+    <div class='filter-bar' data-table='tbl3'>
+      <input type='search' placeholder='Filter by chart, kind, name…'>
+      <button class='filter-btn active' data-status='all'>All</button>
+      <button class='filter-btn' data-status='over-limit'>Secret Over Limit</button>
+      <button class='filter-btn' data-status='warning'>Secret Warning</button>
+      <span class='row-count'></span>
+    </div>
+    <div class='table-wrap'>
+      <table id='tbl3'>
+        <thead><tr>
+          <th data-col='0'>Chart<span class='sort-icon'></span></th>
+          <th data-col='1'>Kind<span class='sort-icon'></span></th>
+          <th data-col='2'>Name<span class='sort-icon'></span></th>
+          <th data-col='3'>Size<span class='sort-icon'></span></th>
+          <th data-col='4'>Flag<span class='sort-icon'></span></th>
+        </tr></thead>
+        <tbody>$RES_ROWS</tbody>
+      </table>
+    </div>
+    <div class='tip-box'>
+      <div class='tip-title'>💡 Remediation</div>
+      <ul>
+        <li><strong>Secret over 1 MB:</strong> Move to an external secret manager (External Secrets Operator, Vault, AWS Secrets Manager) or split into multiple scoped Secrets.</li>
+        <li><strong>Large ConfigMap:</strong> Mount from a volume or external store rather than embedding in the chart.</li>
+      </ul>
+    </div>
+  </div>
 </section>"
 
 # =============================================================================
@@ -365,7 +459,7 @@ for c in "${CHARTS[@]}"; do
     printf "  ${BLD}%s${RST}  ←  %s\n" "$name" "$(basename "$override")"
 
     python3 - "$default_values" "$override" "$name" <<'PYEOF'
-import sys, yaml
+import sys, os, yaml
 
 def flatten(d, prefix=""):
     out = {}
@@ -399,11 +493,12 @@ unique    = [k for k in overrides if k not in defaults or defaults[k] != overrid
 print(f"    Redundant keys (same as default): {len(redundant)}")
 print(f"    Unique/overriding keys:           {len(unique)}")
 
+override_file = os.path.basename(override_path)
 html_rows = ""
 for k, v in redundant[:30]:
     val_str = str(v)[:80]
     print(f"      {k} = {val_str}")
-    html_rows += f"<tr><td>{chart_name}</td><td>{k}</td><td>{val_str}</td></tr>"
+    html_rows += f"<tr data-status='warning'><td>{chart_name}</td><td><span class='badge muted'>{override_file}</span></td><td style='font-family:var(--mono);font-size:.75rem;color:var(--yellow)'>{k}</td><td style='font-family:var(--mono);font-size:.72rem;color:var(--muted)'>{val_str}</td></tr>"
 
 print(f"__HTML_ROWS__{html_rows}__END_HTML_ROWS__")
 PYEOF
@@ -415,12 +510,30 @@ REDUNDANT_ROWS=$(grep -oP '(?<=__HTML_ROWS__).*(?=__END_HTML_ROWS__)' \
   /tmp/helm-scan-redundant-raw.txt | tr -d '\n' || true)
 
 html_section "
-<section>
-  <h2>4 · Redundant Values (identical to chart defaults)</h2>
-  <table>
-    <thead><tr><th>Chart</th><th>Key</th><th>Value</th></tr></thead>
-    <tbody>$REDUNDANT_ROWS</tbody>
-  </table>
+<section id='sec4'>
+  <div class='section-header'>
+    <span class='section-num'>4</span>
+    <h2>Redundant Values</h2>
+    <span class='collapse-icon'>▶</span>
+  </div>
+  <div class='section-desc'>Keys in your override files whose value is <strong>identical to the chart default</strong>. Safe to delete — they add size without changing behaviour.</div>
+  <div class='section-body'>
+    <div class='filter-bar' data-table='tbl4'>
+      <input type='search' placeholder='Filter by chart or key…'>
+      <span class='row-count'></span>
+    </div>
+    <div class='table-wrap'>
+      <table id='tbl4'>
+        <thead><tr>
+          <th data-col='0'>Chart<span class='sort-icon'></span></th>
+          <th data-col='1'>File<span class='sort-icon'></span></th>
+          <th data-col='2'>Key<span class='sort-icon'></span></th>
+          <th data-col='3'>Value (same as default)<span class='sort-icon'></span></th>
+        </tr></thead>
+        <tbody>$REDUNDANT_ROWS</tbody>
+      </table>
+    </div>
+  </div>
 </section>"
 
 # =============================================================================
@@ -488,7 +601,7 @@ print(f"    Unused keys: {len(unused)}")
 html_rows = ""
 for k in unused[:40]:
     print(f"      .Values.{k}")
-    html_rows += f"<tr><td>{chart_name}</td><td>.Values.{k}</td></tr>"
+    html_rows += f"<tr data-status='warning'><td>{chart_name}</td><td style='font-family:var(--mono);font-size:.75rem;color:var(--yellow)'>.Values.{k}</td></tr>"
 
 print(f"__HTML_ROWS__{html_rows}__END_HTML_ROWS__")
 PYEOF
@@ -499,12 +612,28 @@ UNUSED_ROWS=$(grep -oP '(?<=__HTML_ROWS__).*(?=__END_HTML_ROWS__)' \
   /tmp/helm-scan-unused-raw.txt | tr -d '\n' || true)
 
 html_section "
-<section>
-  <h2>5 · Unused Values (not referenced in templates)</h2>
-  <table>
-    <thead><tr><th>Chart</th><th>Key</th></tr></thead>
-    <tbody>$UNUSED_ROWS</tbody>
-  </table>
+<section id='sec5'>
+  <div class='section-header'>
+    <span class='section-num'>5</span>
+    <h2>Unused Values</h2>
+    <span class='collapse-icon'>▶</span>
+  </div>
+  <div class='section-desc'>Keys defined in <code>values.yaml</code> with no reference found in any template. Candidates for removal — verify manually before deleting (may be used by sub-chart dependencies).</div>
+  <div class='section-body'>
+    <div class='filter-bar' data-table='tbl5'>
+      <input type='search' placeholder='Filter by chart or key…'>
+      <span class='row-count'></span>
+    </div>
+    <div class='table-wrap'>
+      <table id='tbl5'>
+        <thead><tr>
+          <th data-col='0'>Chart<span class='sort-icon'></span></th>
+          <th data-col='1'>Key<span class='sort-icon'></span></th>
+        </tr></thead>
+        <tbody>$UNUSED_ROWS</tbody>
+      </table>
+    </div>
+  </div>
 </section>"
 
 # =============================================================================
@@ -521,8 +650,8 @@ for c in "${CHARTS[@]}"; do
 done
 
 if [[ ${#ALL_VALUES_FILES[@]} -gt 1 ]]; then
-  python3 - "${ALL_VALUES_FILES[@]}" <<'PYEOF'
-import sys, yaml
+  python3 - "${ALL_VALUES_FILES[@]}" <<'PYEOF' | tee /tmp/helm-scan-dup-raw.txt | grep -v "__HTML_ROWS__"
+import sys, os, yaml
 from collections import defaultdict
 
 files = sys.argv[1:]
@@ -553,19 +682,46 @@ for fp in files:
 dupes = {k: v for k, v in key_sources.items() if len(v) > 1}
 print(f"  Duplicated key=value pairs across charts: {len(dupes)}")
 print(f"  (Candidates to hoist into a global values file)\n")
+html_rows = ""
 for kv, sources in sorted(dupes.items(), key=lambda x: -len(x[1]))[:30]:
     k, _, v = kv.partition("=")
     print(f"  {k} = {v[:60]}")
     for s in sources:
         print(f"      {s}")
+    srcs_html = " ".join(f"<span class='badge muted'>{os.path.basename(s)}</span>" for s in sources)
+    html_rows += f"<tr data-status='warning'><td style='font-family:var(--mono);font-size:.75rem;color:var(--yellow)'>{k}</td><td style='font-family:var(--mono);font-size:.72rem;color:var(--muted)'>{v[:80]}</td><td>{len(sources)}</td><td>{srcs_html}</td></tr>"
+print(f"__HTML_ROWS__{html_rows}__END_HTML_ROWS__")
 PYEOF
 fi
 
+DUP_ROWS=$(grep -oP '(?<=__HTML_ROWS__).*(?=__END_HTML_ROWS__)' \
+  /tmp/helm-scan-dup-raw.txt | tr -d '\n' 2>/dev/null || true)
+
 html_section "
-<section>
-  <h2>6 · Duplicate Values Across Charts</h2>
-  <p>Candidates to hoist into a shared <code>global:</code> block.</p>
-  <pre id='dup-out'>See terminal output — run with --html for full list</pre>
+<section id='sec6'>
+  <div class='section-header'>
+    <span class='section-num'>6</span>
+    <h2>Duplicate Values Across Charts</h2>
+    <span class='collapse-icon'>▶</span>
+  </div>
+  <div class='section-desc'>Key=value pairs that appear identically in multiple charts. Hoist into a shared <code>global:</code> block or a repo-level values file to eliminate duplication.</div>
+  <div class='section-body'>
+    <div class='filter-bar' data-table='tbl6'>
+      <input type='search' placeholder='Filter by key or value…'>
+      <span class='row-count'></span>
+    </div>
+    <div class='table-wrap'>
+      <table id='tbl6'>
+        <thead><tr>
+          <th data-col='0'>Key<span class='sort-icon'></span></th>
+          <th data-col='1'>Value<span class='sort-icon'></span></th>
+          <th data-col='2'># Charts<span class='sort-icon'></span></th>
+          <th data-col='3'>Found In<span class='sort-icon'></span></th>
+        </tr></thead>
+        <tbody>$DUP_ROWS</tbody>
+      </table>
+    </div>
+  </div>
 </section>"
 
 # =============================================================================
@@ -588,17 +744,47 @@ for c in "${CHARTS[@]}"; do
     col=$GRN tag="OK"
   fi
   printf "  ${col}%-40s  %8s  (%3d%% of 5 MB)  %s${RST}\n" "$name" "$h" "$pct" "$tag"
-  DIR_ROWS+="<tr class='$(echo $tag | tr ' ' '-' | tr '[:upper:]' '[:lower:]')'>"
-  DIR_ROWS+="<td>$name</td><td>$h</td><td>$pct%</td><td>$tag</td></tr>"
+  DIR_ROWS+="<tr class='$(echo $tag | tr ' ' '-' | tr '[:upper:]' '[:lower:]')' data-status='$(echo $tag | tr ' ' '-' | tr '[:upper:]' '[:lower:]')'>"
+  bar_cls="ok"
+  [[ "$tag" == "WARNING" ]] && bar_cls="warn"
+  [[ "$tag" == "OVER LIMIT" ]] && bar_cls="err"
+  badge_cls="ok"
+  [[ "$tag" == "WARNING" ]] && badge_cls="warn"
+  [[ "$tag" == "OVER LIMIT" ]] && badge_cls="err"
+  DIR_ROWS+="<td>$name</td><td data-val='$sz'>$h</td>"
+  DIR_ROWS+="<td><div class='bar-wrap'><div class='bar-track'><div class='bar-fill $bar_cls' style='width:${pct}%'></div></div><span class='bar-label'>$pct%</span></div></td>"
+  DIR_ROWS+="<td><span class='badge $badge_cls'>$tag</span></td></tr>"
 done
 
 html_section "
-<section>
-  <h2>7 · Chart Directory Sizes</h2>
-  <table>
-    <thead><tr><th>Chart</th><th>Size</th><th>% of 5 MB</th><th>Status</th></tr></thead>
-    <tbody>$DIR_ROWS</tbody>
-  </table>
+<section id='sec7'>
+  <div class='section-header'>
+    <span class='section-num'>7</span>
+    <h2>Chart Directory Sizes</h2>
+    <span class='collapse-icon'>▶</span>
+  </div>
+  <div class='section-desc'>Raw disk size of each chart directory — a fast pre-package estimate before <code>helm package</code> runs. Does not account for <code>.helmignore</code> exclusions.</div>
+  <div class='section-body'>
+    <div class='filter-bar' data-table='tbl7'>
+      <input type='search' placeholder='Filter charts…'>
+      <button class='filter-btn active' data-status='all'>All</button>
+      <button class='filter-btn' data-status='over-limit'>Over Limit</button>
+      <button class='filter-btn' data-status='warning'>Warning</button>
+      <button class='filter-btn' data-status='ok'>OK</button>
+      <span class='row-count'></span>
+    </div>
+    <div class='table-wrap'>
+      <table id='tbl7'>
+        <thead><tr>
+          <th data-col='0'>Chart<span class='sort-icon'></span></th>
+          <th data-col='1'>Dir Size<span class='sort-icon'></span></th>
+          <th data-col='2'>% of 5 MB<span class='sort-icon'></span></th>
+          <th data-col='3'>Status<span class='sort-icon'></span></th>
+        </tr></thead>
+        <tbody>$DIR_ROWS</tbody>
+      </table>
+    </div>
+  </div>
 </section>"
 
 # =============================================================================
@@ -614,10 +800,10 @@ for c in "${CHARTS[@]}"; do
   if [[ -f "$ignore_file" ]]; then
     sz=$(wc -l <"$ignore_file")
     printf "  ${GRN}%-40s  .helmignore present (%d lines)${RST}\n" "$name" "$sz"
-    IGNORE_ROWS+="<tr class='ok'><td>$name</td><td>Present</td><td>$sz lines</td></tr>"
+    IGNORE_ROWS+="<tr class='ok' data-status='ok'><td>$name</td><td><span class='badge ok'>Present</span></td><td>$sz</td></tr>"
   else
     printf "  ${YEL}%-40s  .helmignore MISSING${RST}\n" "$name"
-    IGNORE_ROWS+="<tr class='warning'><td>$name</td><td>Missing</td><td>—</td></tr>"
+    IGNORE_ROWS+="<tr class='warning' data-status='warning'><td>$name</td><td><span class='badge warn'>Missing</span></td><td>—</td></tr>"
   fi
 done
 
@@ -627,25 +813,35 @@ echo "  Recommended .helmignore entries:"
 printf "  %b\n" "$RECOMMENDED_IGNORE" | sed 's/^/    /'
 
 html_section "
-<section>
-  <h2>8 · .helmignore Audit</h2>
-  <table>
-    <thead><tr><th>Chart</th><th>Status</th><th>Lines</th></tr></thead>
-    <tbody>$IGNORE_ROWS</tbody>
-  </table>
-  <p>Recommended entries: <code>*.md, *.txt, CHANGELOG, tests/, ci/, .github/, .git/</code></p>
+<section id='sec8'>
+  <div class='section-header'>
+    <span class='section-num'>8</span>
+    <h2>.helmignore Audit</h2>
+    <span class='collapse-icon'>▶</span>
+  </div>
+  <div class='section-desc'><code>.helmignore</code> must exist in <strong>each chart root</strong> — it is not inherited. Missing files mean docs, tests, and CI artifacts inflate package size unnecessarily.</div>
+  <div class='section-body'>
+    <div class='table-wrap'>
+      <table id='tbl8'>
+        <thead><tr>
+          <th data-col='0'>Chart<span class='sort-icon'></span></th>
+          <th data-col='1'>Status<span class='sort-icon'></span></th>
+          <th data-col='2'>Lines<span class='sort-icon'></span></th>
+        </tr></thead>
+        <tbody>$IGNORE_ROWS</tbody>
+      </table>
+    </div>
+    <div class='tip-box'>
+      <div class='tip-title'>💡 Recommended .helmignore entries</div>
+      <ul>
+        <li><code>*.md</code> &nbsp;<code>*.txt</code> &nbsp;<code>CHANGELOG</code> — documentation</li>
+        <li><code>tests/</code> &nbsp;<code>test/</code> — test fixtures</li>
+        <li><code>ci/</code> &nbsp;<code>.github/</code> &nbsp;<code>.git/</code> — CI and VCS metadata</li>
+        <li><code>*.orig</code> &nbsp;<code>*.bak</code> — editor artifacts</li>
+      </ul>
+    </div>
+  </div>
 </section>"
-
-# =============================================================================
-# CLEANUP TEMP FILES
-# =============================================================================
-for c in "${CHARTS[@]}"; do
-  chart_dir=$(dirname "$c")
-  tmp="${CHART_RENDER_PATH[$chart_dir]:-}"
-  [[ -n "$tmp" && -f "$tmp" ]] && rm -f "$tmp"
-done
-rm -f /tmp/helm-scan-res-raw.txt /tmp/helm-scan-redundant-raw.txt \
-  /tmp/helm-scan-unused-raw.txt
 
 # =============================================================================
 # SUMMARY
@@ -1144,3 +1340,14 @@ HTML_FOOT
   echo
   echo "  → HTML report written to: helm-scan-report.html"
 fi
+
+# =============================================================================
+# CLEANUP TEMP FILES
+# =============================================================================
+for c in "${CHARTS[@]}"; do
+  chart_dir=$(dirname "$c")
+  tmp="${CHART_RENDER_PATH[$chart_dir]:-}"
+  [[ -n "$tmp" && -f "$tmp" ]] && rm -f "$tmp"
+done
+rm -f /tmp/helm-scan-res-raw.txt /tmp/helm-scan-redundant-raw.txt \
+  /tmp/helm-scan-unused-raw.txt /tmp/helm-scan-dup-raw.txt
