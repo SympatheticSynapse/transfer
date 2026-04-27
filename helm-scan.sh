@@ -394,10 +394,10 @@ for sz, kind, ns, nm in rows[:15]:
 print(f"__HTML_ROWS__{html_rows}__END_HTML_ROWS__")
 PYEOF
 
-done | tee /tmp/helm-scan-res-raw.txt | grep -v "__HTML_ROWS__"
+done | tee /tmp/helm-scan-res-raw.txt | grep -v "__HTML_ROWS__" || true
 
 # extract html rows
-RES_ROWS=$(grep -oP '(?<=__HTML_ROWS__).*(?=__END_HTML_ROWS__)' \
+RES_ROWS=$(grep -oP '(?<=__HTML_ROWS__).*(?=__END_HTML_ROWS__)' -- \
   /tmp/helm-scan-res-raw.txt | tr -d '\n' || true)
 
 html_section "
@@ -504,9 +504,9 @@ print(f"__HTML_ROWS__{html_rows}__END_HTML_ROWS__")
 PYEOF
 
   done < <(find "$chart_dir" -maxdepth 2 -name "values*.yaml" | sort)
-done | tee /tmp/helm-scan-redundant-raw.txt | grep -v "__HTML_ROWS__"
+done | tee /tmp/helm-scan-redundant-raw.txt | grep -v "__HTML_ROWS__" || true
 
-REDUNDANT_ROWS=$(grep -oP '(?<=__HTML_ROWS__).*(?=__END_HTML_ROWS__)' \
+REDUNDANT_ROWS=$(grep -oP '(?<=__HTML_ROWS__).*(?=__END_HTML_ROWS__)' -- \
   /tmp/helm-scan-redundant-raw.txt | tr -d '\n' || true)
 
 html_section "
@@ -606,9 +606,9 @@ for k in unused[:40]:
 print(f"__HTML_ROWS__{html_rows}__END_HTML_ROWS__")
 PYEOF
 
-done | tee /tmp/helm-scan-unused-raw.txt | grep -v "__HTML_ROWS__"
+done | tee /tmp/helm-scan-unused-raw.txt | grep -v "__HTML_ROWS__" || true
 
-UNUSED_ROWS=$(grep -oP '(?<=__HTML_ROWS__).*(?=__END_HTML_ROWS__)' \
+UNUSED_ROWS=$(grep -oP '(?<=__HTML_ROWS__).*(?=__END_HTML_ROWS__)' -- \
   /tmp/helm-scan-unused-raw.txt | tr -d '\n' || true)
 
 html_section "
@@ -650,7 +650,7 @@ for c in "${CHARTS[@]}"; do
 done
 
 if [[ ${#ALL_VALUES_FILES[@]} -gt 1 ]]; then
-  python3 - "${ALL_VALUES_FILES[@]}" <<'PYEOF' | tee /tmp/helm-scan-dup-raw.txt | grep -v "__HTML_ROWS__"
+  python3 - "${ALL_VALUES_FILES[@]}" <<'PYEOF' | tee /tmp/helm-scan-dup-raw.txt | grep -v "__HTML_ROWS__" || true
 import sys, os, yaml
 from collections import defaultdict
 
@@ -694,7 +694,7 @@ print(f"__HTML_ROWS__{html_rows}__END_HTML_ROWS__")
 PYEOF
 fi
 
-DUP_ROWS=$(grep -oP '(?<=__HTML_ROWS__).*(?=__END_HTML_ROWS__)' \
+DUP_ROWS=$(grep -oP '(?<=__HTML_ROWS__).*(?=__END_HTML_ROWS__)' -- \
   /tmp/helm-scan-dup-raw.txt | tr -d '\n' 2>/dev/null || true)
 
 html_section "
@@ -873,11 +873,11 @@ if [[ "$EMIT_HTML" == true ]]; then
       sz=$(wc -c <"$TMP_RENDER")
       pct=$((sz * 100 / HELM_LIMIT))
       if ((sz > HELM_LIMIT)); then
-        ((OVER_LIMIT_COUNT++))
+        ((OVER_LIMIT_COUNT++)) || true
       elif ((pct > WARN_RATIO)); then
-        ((WARN_COUNT++))
+        ((WARN_COUNT++)) || true
       else
-        ((OK_COUNT++))
+        ((OK_COUNT++)) || true
       fi
       # check for large secrets
       secret_issues=$(python3 -c "
@@ -889,11 +889,11 @@ try:
     print(count)
 except: print(0)
 " 2>/dev/null || echo 0)
-      ((SECRET_WARN_COUNT += secret_issues))
+      ((SECRET_WARN_COUNT += secret_issues)) || true
     else
-      ((OVER_LIMIT_COUNT++))
+      ((OVER_LIMIT_COUNT++)) || true
     fi
-    [[ ! -f "$chart_dir/.helmignore" ]] && ((MISSING_IGNORE_COUNT++))
+    [[ ! -f "$chart_dir/.helmignore" ]] && ((MISSING_IGNORE_COUNT++)) || true
   done
 
   TOTAL_ISSUES=$((OVER_LIMIT_COUNT + WARN_COUNT + SECRET_WARN_COUNT + MISSING_IGNORE_COUNT))
