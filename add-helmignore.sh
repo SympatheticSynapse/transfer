@@ -27,12 +27,12 @@ copied=0
 
 while IFS= read -r chart_yaml; do
   dir="$(dirname "$chart_yaml")"
-  ((found++))
+  found=$((found + 1))
 
   if [[ ! -f "$dir/.helmignore" ]]; then
     cp "$SOURCE_HELMIGNORE" "$dir/.helmignore"
     echo "Copied .helmignore → $dir"
-    ((copied++))
+    copied=$((copied + 1))
   else
     echo "Skipped (already exists) → $dir"
   fi
