@@ -149,10 +149,19 @@ def parse_log_file(path):
             if BLOCK_CLOSE_RE.match(line) and block_stack:
                 finished = block_stack.pop()
                 if finished["type"] == "stage":
+                    # Prefer the agent captured at close time over the one
+                    # captured at push time: if a stage declares its own
+                    # `agent {}` (node opens *inside* the stage), the stage's
+                    # opening line is seen before "Running on ..." for that
+                    # stage, so the push-time value can still be leftover
+                    # from a previous stage/agent. By close time, "Running
+                    # on" for this stage's own node (if any) has already
+                    # been seen and current_agent reflects it correctly.
+                    agent = current_agent or finished["agent"] or "(unknown)"
                     stage_records.append({
                         "file": os.path.basename(path),
                         "stage": finished["name"],
-                        "agent": finished["agent"] or current_agent or "(unknown)",
+                        "agent": agent,
                         "start_ts": finished["start_ts"],
                         "end_ts": ts,
                         "is_container": finished["has_child_stage"],
