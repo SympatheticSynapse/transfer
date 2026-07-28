@@ -125,11 +125,21 @@ def parse_log_file(path):
             if m:
                 name = m.group(1)
                 is_stage = pending_stage_marker and name is not None
+                if is_stage:
+                    # Mark the nearest enclosing stage as a "container" --
+                    # Jenkins' declarative parallel-stages feature marks both
+                    # the grouping stage AND each branch with [Pipeline] stage,
+                    # so the container fully overlaps its children in time.
+                    for block in reversed(block_stack):
+                        if block["type"] == "stage":
+                            block["has_child_stage"] = True
+                            break
                 block_stack.append({
                     "type": "stage" if is_stage else "other",
                     "name": name,
                     "start_ts": ts,
                     "agent": current_agent,
+                    "has_child_stage": False,
                 })
                 pending_stage_marker = False
                 continue
@@ -145,6 +155,7 @@ def parse_log_file(path):
                         "agent": finished["agent"] or current_agent or "(unknown)",
                         "start_ts": finished["start_ts"],
                         "end_ts": ts,
+                        "is_container": finished["has_child_stage"],
                     })
                 continue
 
@@ -244,10 +255,43 @@ def pack_sublanes(rows_for_agent):
     return ordered, len(lane_end_times)
 
 
-def plot_timeline(stage_records, out_path, title="Pipeline stage occupancy by agent", file_filter=None):
+def collapse_to_pipeline_view(rows):
+    """Merge all stage records for the same (file, agent) into a single
+    span -- one bar per pipeline run on that agent, instead of one bar per
+    stage. A pipeline holds its agent for the whole run (small gaps between
+    consecutive stages are just log formatting overhead, not the pipeline
+    leaving and re-acquiring the agent), so this always spans
+    min(start) .. max(end) rather than splitting on small gaps."""
+    by_key = {}
+    for r in rows:
+        by_key.setdefault((r["file"], r["agent"]), []).append(r)
+
+    merged = []
+    for (file, agent), items in by_key.items():
+        merged.append({
+            "file": file,
+            "agent": agent,
+            "stage": file,
+            "start_ts": min(r["start_ts"] for r in items),
+            "end_ts": max(r["end_ts"] for r in items),
+        })
+    return merged
+
+
+def plot_timeline(stage_records, out_path, title="Pipeline stage occupancy by agent",
+                   file_filter=None, view="stage", show_containers=False):
     rows = [r for r in stage_records if r["start_ts"] is not None and r["end_ts"] is not None]
     if file_filter:
         rows = [r for r in rows if r["file"] in file_filter]
+    if not show_containers:
+        # Drop wrapper/container stages (e.g. a declarative "parallel stages"
+        # grouping stage) that fully overlap their own child stages on the
+        # same agent -- otherwise they inflate the lane count for no reason.
+        rows = [r for r in rows if not r.get("is_container")]
+
+    if view == "pipeline":
+        rows = collapse_to_pipeline_view(rows)
+        title = title or "Pipeline occupancy by agent"
 
     if not rows:
         print("No complete stage records to plot (need both start and end times).",
@@ -362,6 +406,13 @@ def main():
     parser.add_argument("--files", nargs="*", default=None,
                          help="Optional: only include these log filenames in the chart")
     parser.add_argument("--title", default="Pipeline stage occupancy by agent")
+    parser.add_argument("--view", choices=["stage", "pipeline"], default="stage",
+                         help="'stage': one bar per stage (detailed). "
+                              "'pipeline': one bar per pipeline run per agent (simpler, less clutter).")
+    parser.add_argument("--show-containers", action="store_true",
+                         help="Include wrapper stages (e.g. declarative parallel-stages groups) "
+                              "that fully overlap their own child stages. Off by default since "
+                              "they just duplicate their children's time range.")
     parser.add_argument("--no-plot", action="store_true", help="Only parse and write CSVs, skip the chart")
     args = parser.parse_args()
 
@@ -380,12 +431,13 @@ def main():
 
     if all_stage_records:
         with open(args.out_timeline, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["file", "stage", "agent", "start_ts", "end_ts"])
+            writer = csv.DictWriter(f, fieldnames=["file", "stage", "agent", "start_ts", "end_ts", "is_container"])
             writer.writeheader()
             for r in all_stage_records:
                 writer.writerow({
                     "file": r["file"], "stage": r["stage"], "agent": r["agent"],
                     "start_ts": fmt_ts(r["start_ts"]), "end_ts": fmt_ts(r["end_ts"]),
+                    "is_container": r["is_container"],
                 })
         print(f"Wrote {len(all_stage_records)} stage timeline rows to {args.out_timeline}")
 
@@ -404,6 +456,7 @@ def main():
         plot_timeline(
             all_stage_records, args.plot_out, title=args.title,
             file_filter=set(args.files) if args.files else None,
+            view=args.view, show_containers=args.show_containers,
         )
 
 
