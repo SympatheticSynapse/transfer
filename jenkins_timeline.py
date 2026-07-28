@@ -149,15 +149,7 @@ def parse_log_file(path):
             if BLOCK_CLOSE_RE.match(line) and block_stack:
                 finished = block_stack.pop()
                 if finished["type"] == "stage":
-                    # Prefer the agent captured at close time over the one
-                    # captured at push time: if a stage declares its own
-                    # `agent {}` (node opens *inside* the stage), the stage's
-                    # opening line is seen before "Running on ..." for that
-                    # stage, so the push-time value can still be leftover
-                    # from a previous stage/agent. By close time, "Running
-                    # on" for this stage's own node (if any) has already
-                    # been seen and current_agent reflects it correctly.
-                    agent = current_agent or finished["agent"] or "(unknown)"
+                    agent = finished["agent"] or "(unknown)"
                     stage_records.append({
                         "file": os.path.basename(path),
                         "stage": finished["name"],
@@ -175,6 +167,20 @@ def parse_log_file(path):
             m = RUNNING_ON_RE.match(line)
             if m:
                 current_agent = m.group(1)
+                # Stamp this agent onto the nearest currently-open stage
+                # *right now*, rather than relying on push-time or
+                # close-time snapshots. This is correct regardless of
+                # nesting order: whether the whole pipeline opens one node
+                # around many stages (Running on fires before any stage is
+                # pushed -- push-time capture on later stages handles that),
+                # or each stage declares its own `agent {}` (node opens
+                # *inside* the stage, so Running on fires while that stage
+                # is already on the stack -- this live update corrects it
+                # immediately instead of leaving it to be inferred later).
+                for block in reversed(block_stack):
+                    if block["type"] == "stage":
+                        block["agent"] = current_agent
+                        break
                 continue
 
             if STASH_RE.match(line):
@@ -216,6 +222,19 @@ def parse_log_file(path):
                 })
                 pending_event = None
                 continue
+
+    if block_stack:
+        unclosed_stages = [b["name"] for b in block_stack if b["type"] == "stage"]
+        if unclosed_stages:
+            print(
+                f"WARNING: {os.path.basename(path)}: reached end of file with "
+                f"{len(block_stack)} block(s) still open, including stage(s) "
+                f"{unclosed_stages!r}. This usually means a '[Pipeline] }}' closing "
+                f"line wasn't recognized (unexpected log format) or the build is "
+                f"still running -- these stages will be excluded from the chart "
+                f"since they have no end time.",
+                file=sys.stderr,
+            )
 
     return events, stage_records
 
