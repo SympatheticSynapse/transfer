@@ -103,7 +103,11 @@ def parse_log_file(path):
     """Parse a single Jenkins console log.
     Returns (events, stage_records):
       events: list of stash/unstash event dicts
-      stage_records: list of {file, stage, agent, start_ts, end_ts}
+      stage_records: list of {file, stage, agent, start_ts, end_ts, wait_start, run_start}
+        wait_start/run_start describe queueing time waiting for an executor:
+        if set, [wait_start, run_start] was spent waiting and [run_start, end_ts]
+        was actually running on the agent. If unset, the whole [start_ts, end_ts]
+        span is running time (agent was already held when the stage began).
     """
     events = []
     stage_records = []
@@ -111,6 +115,8 @@ def parse_log_file(path):
     current_agent = None
     pending_stage_marker = False
     pending_event = None   # ('stash'|'unstash', ts, lineno)
+    node_request_stack = []  # {request_ts, stage_block or None} per open "[Pipeline] node"
+    top_level_waits = []      # waits not tied to a specific stage (whole-pipeline agent)
 
     with open(path, "r", errors="replace") as f:
         for lineno, raw_line in enumerate(f, 1):
@@ -140,6 +146,8 @@ def parse_log_file(path):
                     "start_ts": ts,
                     "agent": current_agent,
                     "has_child_stage": False,
+                    "wait_start": None,
+                    "run_start": None,
                 })
                 pending_stage_marker = False
                 continue
@@ -157,16 +165,28 @@ def parse_log_file(path):
                         "start_ts": finished["start_ts"],
                         "end_ts": ts,
                         "is_container": finished["has_child_stage"],
+                        "wait_start": finished["wait_start"],
+                        "run_start": finished["run_start"],
                     })
                 continue
 
             if NODE_START_RE.match(line):
                 current_agent = None
+                nearest_stage = None
+                for block in reversed(block_stack):
+                    if block["type"] == "stage":
+                        nearest_stage = block
+                        break
+                node_request_stack.append({"request_ts": ts, "stage_block": nearest_stage})
                 continue
 
             m = RUNNING_ON_RE.match(line)
             if m:
                 current_agent = m.group(1)
+                node_req = node_request_stack.pop() if node_request_stack else None
+                wait_start = node_req["request_ts"] if node_req else None
+                stage_block = node_req["stage_block"] if node_req else None
+
                 # Stamp this agent onto the nearest currently-open stage
                 # *right now*, rather than relying on push-time or
                 # close-time snapshots. This is correct regardless of
@@ -180,7 +200,20 @@ def parse_log_file(path):
                 for block in reversed(block_stack):
                     if block["type"] == "stage":
                         block["agent"] = current_agent
+                        if stage_block is block and wait_start is not None and ts > wait_start:
+                            block["wait_start"] = wait_start
+                            block["run_start"] = ts
                         break
+                else:
+                    # No stage currently open -- this node/agent was acquired
+                    # at the top level, wrapping stages that haven't started
+                    # yet. Queue it; the first stage that inherits this agent
+                    # without its own wait will get this as a leading gap.
+                    if wait_start is not None and ts > wait_start:
+                        top_level_waits.append({
+                            "agent": current_agent, "wait_start": wait_start,
+                            "run_start": ts, "consumed": False,
+                        })
                 continue
 
             if STASH_RE.match(line):
@@ -236,6 +269,25 @@ def parse_log_file(path):
                 file=sys.stderr,
             )
 
+    # Attach any top-level (whole-pipeline) queueing wait to the first stage
+    # that inherited that agent without a wait of its own -- e.g. a single
+    # `node { stage('A'){...}; stage('B'){...} }` that had to queue before
+    # "Running on" fired: stage A gets the leading gap, B does not (the
+    # agent was already held continuously by then).
+    for wait in top_level_waits:
+        if wait["consumed"]:
+            continue
+        candidates = [
+            r for r in stage_records
+            if r["agent"] == wait["agent"] and r["wait_start"] is None
+            and r["start_ts"] >= wait["run_start"]
+        ]
+        if candidates:
+            first = min(candidates, key=lambda r: r["start_ts"])
+            first["wait_start"] = wait["wait_start"]
+            first["run_start"] = wait["run_start"]
+            wait["consumed"] = True
+
     return events, stage_records
 
 
@@ -266,13 +318,19 @@ PALETTE = [
 
 def pack_sublanes(rows_for_agent):
     """Greedy interval packing: assign each row a sub-lane index so that
-    overlapping time ranges on the same agent never share a lane."""
+    overlapping time ranges on the same agent never share a lane. Uses the
+    full span including any queueing wait, so a "waiting for an agent" gap
+    still reserves its lane and never visually collides with another bar."""
+    def eff_start(r):
+        return r["wait_start"] if r.get("wait_start") is not None else r["start_ts"]
+
     lane_end_times = []
-    ordered = sorted(rows_for_agent, key=lambda r: r["start_ts"])
+    ordered = sorted(rows_for_agent, key=eff_start)
     for r in ordered:
         placed = False
+        start = eff_start(r)
         for lane_idx, end_time in enumerate(lane_end_times):
-            if r["start_ts"] >= end_time:
+            if start >= end_time:
                 lane_end_times[lane_idx] = r["end_ts"]
                 r["lane"] = lane_idx
                 placed = True
@@ -296,12 +354,16 @@ def collapse_to_pipeline_view(rows):
 
     merged = []
     for (file, agent), items in by_key.items():
+        items_sorted = sorted(items, key=lambda r: r["start_ts"])
+        first = items_sorted[0]
         merged.append({
             "file": file,
             "agent": agent,
             "stage": file,
             "start_ts": min(r["start_ts"] for r in items),
             "end_ts": max(r["end_ts"] for r in items),
+            "wait_start": first.get("wait_start"),
+            "run_start": first.get("run_start"),
         })
     return merged
 
@@ -364,14 +426,23 @@ def plot_timeline(stage_records, out_path, title="Pipeline stage occupancy by ag
     for a in agents:
         for r in rows_by_agent[a]:
             y = agent_lane_y[a][r["lane"]]
-            start_num = r["start_ts"]
-            duration = r["end_ts"] - r["start_ts"]
+            run_start = r["start_ts"]
+            if r.get("wait_start") is not None and r.get("run_start") is not None:
+                wait_duration = r["run_start"] - r["wait_start"]
+                ax.barh(
+                    y, wait_duration, left=r["wait_start"], height=bar_height,
+                    facecolor=color_map[r["file"]], edgecolor=color_map[r["file"]],
+                    linewidth=0.5, align="center", zorder=2, alpha=0.25,
+                    hatch="////",
+                )
+                run_start = r["run_start"]
+            duration = r["end_ts"] - run_start
             patch = ax.barh(
-                y, duration, left=start_num, height=bar_height,
+                y, duration, left=run_start, height=bar_height,
                 color=color_map[r["file"]], edgecolor="white", linewidth=0.5,
                 align="center", zorder=2,
             )[0]
-            mid = r["start_ts"] + duration / 2
+            mid = run_start + duration / 2
             txt = ax.text(
                 mid, y, r["stage"], ha="center", va="center",
                 fontsize=8, color="white", clip_on=True, zorder=3,
@@ -459,13 +530,22 @@ def main():
 
     if all_stage_records:
         with open(args.out_timeline, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["file", "stage", "agent", "start_ts", "end_ts", "is_container"])
+            writer = csv.DictWriter(f, fieldnames=[
+                "file", "stage", "agent", "start_ts", "end_ts", "is_container",
+                "wait_start", "run_start", "queue_wait_seconds",
+            ])
             writer.writeheader()
             for r in all_stage_records:
+                queue_wait = ""
+                if r.get("wait_start") is not None and r.get("run_start") is not None:
+                    queue_wait = round((r["run_start"] - r["wait_start"]).total_seconds(), 1)
                 writer.writerow({
                     "file": r["file"], "stage": r["stage"], "agent": r["agent"],
                     "start_ts": fmt_ts(r["start_ts"]), "end_ts": fmt_ts(r["end_ts"]),
                     "is_container": r["is_container"],
+                    "wait_start": fmt_ts(r.get("wait_start")),
+                    "run_start": fmt_ts(r.get("run_start")),
+                    "queue_wait_seconds": queue_wait,
                 })
         print(f"Wrote {len(all_stage_records)} stage timeline rows to {args.out_timeline}")
 
