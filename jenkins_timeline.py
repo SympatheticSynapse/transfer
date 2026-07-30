@@ -9,12 +9,34 @@ running which stage, over time. Also identifies stash/unstash events.
 Usage:
     python3 jenkins_timeline.py --folder /path/to/logs --plot-out timeline.png
 
+    # Recommended for pipelines that declare a separate `agent {}` per stage
+    # (agent acquired and released for each stage individually, rather than
+    # once for the whole pipeline) -- gives one fixed row per build/file on
+    # every agent, and shows per-stage detail instead of collapsing each
+    # pipeline run into a single bar:
+    python3 jenkins_timeline.py --folder /path/to/logs --view stage --lane-mode per-file --plot-out timeline.png
+
     # Restrict the chart to specific files if it gets crowded:
     python3 jenkins_timeline.py --folder /path/to/logs --files build1.log build2.log
 
+Key flags:
+    --view {stage,pipeline}       stage: one bar per stage (detailed).
+                                  pipeline: one bar per pipeline run per agent
+                                  (simpler; only accurate when a pipeline holds
+                                  one agent for its whole run, not per-stage).
+    --lane-mode {auto,per-file}   auto: compact overlapping bars into as few
+                                  lanes as possible.
+                                  per-file: one fixed row per file/build on
+                                  every agent (e.g. 8 builds always means 8
+                                  lines per agent) -- use this whenever you
+                                  want to compare the same build across agents,
+                                  or when --view stage looks intermixed under
+                                  --lane-mode auto.
+
 Outputs (in the current directory unless overridden):
     jenkins_stage_report.csv     one row per stash/unstash event
-    jenkins_stage_timeline.csv   one row per stage: file, stage, agent, start, end
+    jenkins_stage_timeline.csv   one row per stage: file, stage, agent, start,
+                                  end, wait_start, run_start, queue_wait_seconds
     <plot-out>.png               the swimlane Gantt chart
 
 Parsing notes:
