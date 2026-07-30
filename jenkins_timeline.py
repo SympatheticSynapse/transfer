@@ -369,7 +369,7 @@ def collapse_to_pipeline_view(rows):
 
 
 def plot_timeline(stage_records, out_path, title="Pipeline stage occupancy by agent",
-                   file_filter=None, view="stage", show_containers=False):
+                   file_filter=None, view="stage", show_containers=False, lane_mode="auto"):
     rows = [r for r in stage_records if r["start_ts"] is not None and r["end_ts"] is not None]
     if file_filter:
         rows = [r for r in rows if r["file"] in file_filter]
@@ -391,16 +391,30 @@ def plot_timeline(stage_records, out_path, title="Pipeline stage occupancy by ag
     agents = sorted({r["agent"] for r in rows})
     files = sorted({r["file"] for r in rows})
     color_map = {f: PALETTE[i % len(PALETTE)] for i, f in enumerate(files)}
+    file_lane = {f: i for i, f in enumerate(files)}
 
     rows_by_agent = {a: [] for a in agents}
     for r in rows:
         rows_by_agent[r["agent"]].append(dict(r))
 
     agent_lane_counts = {}
-    for a in agents:
-        packed, lane_count = pack_sublanes(rows_by_agent[a])
-        rows_by_agent[a] = packed
-        agent_lane_counts[a] = lane_count
+    if lane_mode == "per-file":
+        # One fixed row per file/build per agent (not compacted), so e.g.
+        # build3 always sits on the same relative row on every agent and
+        # 6 builds always means 6 lines, even where they don't overlap.
+        # If a single file has genuinely overlapping bars on the same
+        # agent (e.g. two parallel branches both landing on the same
+        # physical agent), they will visually overlap within that file's
+        # row -- a real tradeoff for the fixed-row guarantee.
+        for a in agents:
+            for r in rows_by_agent[a]:
+                r["lane"] = file_lane[r["file"]]
+            agent_lane_counts[a] = len(files)
+    else:
+        for a in agents:
+            packed, lane_count = pack_sublanes(rows_by_agent[a])
+            rows_by_agent[a] = packed
+            agent_lane_counts[a] = lane_count
 
     lane_height = 0.9
     gap = 0.4
@@ -512,6 +526,11 @@ def main():
                          help="Include wrapper stages (e.g. declarative parallel-stages groups) "
                               "that fully overlap their own child stages. Off by default since "
                               "they just duplicate their children's time range.")
+    parser.add_argument("--lane-mode", choices=["auto", "per-file"], default="auto",
+                         help="'auto': compact overlapping bars into as few lanes as possible. "
+                              "'per-file': one fixed row per file/build on every agent (e.g. 6 "
+                              "builds always means 6 lines per agent), easier to compare the "
+                              "same build across agents at the cost of some empty rows.")
     parser.add_argument("--no-plot", action="store_true", help="Only parse and write CSVs, skip the chart")
     args = parser.parse_args()
 
@@ -565,6 +584,7 @@ def main():
             all_stage_records, args.plot_out, title=args.title,
             file_filter=set(args.files) if args.files else None,
             view=args.view, show_containers=args.show_containers,
+            lane_mode=args.lane_mode,
         )
 
 
