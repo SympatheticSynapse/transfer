@@ -391,25 +391,48 @@ def plot_timeline(stage_records, out_path, title="Pipeline stage occupancy by ag
     agents = sorted({r["agent"] for r in rows})
     files = sorted({r["file"] for r in rows})
     color_map = {f: PALETTE[i % len(PALETTE)] for i, f in enumerate(files)}
-    file_lane = {f: i for i, f in enumerate(files)}
 
     rows_by_agent = {a: [] for a in agents}
     for r in rows:
         rows_by_agent[r["agent"]].append(dict(r))
 
     agent_lane_counts = {}
+    file_block_rows = {}   # file -> how many sub-rows its block reserves (global, for alignment)
+    file_block_start = {}  # file -> starting lane index of its block (global, same on every agent)
+    sub_gap = 0.12          # small gap between different files' blocks (vs. lane_height between sub-rows)
+
     if lane_mode == "per-file":
-        # One fixed row per file/build per agent (not compacted), so e.g.
-        # build3 always sits on the same relative row on every agent and
-        # 6 builds always means 6 lines, even where they don't overlap.
-        # If a single file has genuinely overlapping bars on the same
-        # agent (e.g. two parallel branches both landing on the same
-        # physical agent), they will visually overlap within that file's
-        # row -- a real tradeoff for the fixed-row guarantee.
+        # One fixed block per file/build per agent (not compacted away), so
+        # e.g. build3 always sits in the same relative band on every agent
+        # and 6 builds always means 6 blocks. Within a file's own block,
+        # bars are still locally packed -- so if that one build genuinely
+        # has overlapping stages on the same agent (e.g. two parallel
+        # branches landing on the same physical agent), they get their own
+        # sub-rows instead of colliding, while builds with no self-overlap
+        # still get exactly one row.
+        for f in files:
+            needed = 1
+            for a in agents:
+                local_rows = [r for r in rows_by_agent[a] if r["file"] == f]
+                if local_rows:
+                    _, local_count = pack_sublanes(local_rows)
+                    needed = max(needed, local_count)
+            file_block_rows[f] = needed
+
+        cursor_lane = 0
+        for f in files:
+            file_block_start[f] = cursor_lane
+            cursor_lane += file_block_rows[f]
+
         for a in agents:
-            for r in rows_by_agent[a]:
-                r["lane"] = file_lane[r["file"]]
-            agent_lane_counts[a] = len(files)
+            for f in files:
+                local_rows = [r for r in rows_by_agent[a] if r["file"] == f]
+                if not local_rows:
+                    continue
+                packed, _ = pack_sublanes(local_rows)
+                for r in packed:
+                    r["lane"] = file_block_start[f] + r["lane"]
+            agent_lane_counts[a] = sum(file_block_rows.values())
     else:
         for a in agents:
             packed, lane_count = pack_sublanes(rows_by_agent[a])
@@ -423,10 +446,23 @@ def plot_timeline(stage_records, out_path, title="Pipeline stage occupancy by ag
     cursor = 0.0
     for a in agents:
         n_lanes = agent_lane_counts[a]
-        lane_ys = [cursor + i * lane_height for i in range(n_lanes)]
+        if lane_mode == "per-file":
+            # Extra sub_gap inserted between different files' blocks (but
+            # not between sub-rows within the same file's block).
+            lane_ys = []
+            y = cursor
+            for f in files:
+                for i in range(file_block_rows[f]):
+                    lane_ys.append(y)
+                    y += lane_height
+                y += sub_gap
+            agent_block_height = y - sub_gap - cursor
+        else:
+            lane_ys = [cursor + i * lane_height for i in range(n_lanes)]
+            agent_block_height = n_lanes * lane_height
         agent_lane_y[a] = lane_ys
         agent_y_center[a] = sum(lane_ys) / len(lane_ys)
-        cursor += n_lanes * lane_height + gap
+        cursor += agent_block_height + gap
 
     total_height = cursor
     span_seconds = (max(r["end_ts"] for r in rows) - min(r["start_ts"] for r in rows)).total_seconds()
