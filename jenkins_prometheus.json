@@ -28,7 +28,7 @@
       "id": 1,
       "type": "state-timeline",
       "title": "Agent state (one line per agent)",
-      "description": "0 idle/offline, 1 running with capacity left, 2 running with no free executors, 3 no free executors and builds queued (waiting).",
+      "description": "0 idle/offline, 1 running with executors free, 2 running with no free executors, 3 running with no free executors and builds queued (waiting).",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -48,7 +48,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "legendFormat": "{{label}}",
-          "expr": "(\n    (default_jenkins_executors_busy{label=~\"PATTERN_A|PATTERN_B|PATTERN_C\"} > bool 0)\n  +\n    (default_jenkins_executors_available{label=~\"PATTERN_A|PATTERN_B|PATTERN_C\"} == bool 0)\n  +\n    (\n      (default_jenkins_executors_available{label=~\"PATTERN_A|PATTERN_B|PATTERN_C\"} == bool 0)\n      * on() group_left()\n      (sum(default_jenkins_executors_queue_length) > bool 0)\n    )\n)\n* (default_jenkins_executors_online{label=~\"PATTERN_A|PATTERN_B|PATTERN_C\"} > bool 0)"
+          "expr": "(default_jenkins_executors_busy{label=~\"PATTERN_A|PATTERN_B|PATTERN_C\"} > bool 0)\n*\n(\n  1\n  + (default_jenkins_executors_available{label=~\"PATTERN_A|PATTERN_B|PATTERN_C\"} == bool 0)\n  + (\n      (default_jenkins_executors_available{label=~\"PATTERN_A|PATTERN_B|PATTERN_C\"} == bool 0)\n      * on() group_left()\n      (sum(default_jenkins_executors_queue_length) > bool 0)\n    )\n)"
         }
       ],
       "fieldConfig": {
@@ -66,7 +66,7 @@
               "options": {
                 "0": {
                   "text": "Idle",
-                  "color": "transparent",
+                  "color": "#7a7a7a",
                   "index": 0
                 },
                 "1": {
@@ -91,8 +91,20 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "transparent",
+                "color": "#7a7a7a",
                 "value": null
+              },
+              {
+                "color": "blue",
+                "value": 1
+              },
+              {
+                "color": "dark-blue",
+                "value": 2
+              },
+              {
+                "color": "orange",
+                "value": 3
               }
             ]
           }
@@ -157,7 +169,7 @@
               "options": {
                 "0": {
                   "text": "Not running",
-                  "color": "transparent",
+                  "color": "#7a7a7a",
                   "index": 0
                 },
                 "1": {
@@ -172,8 +184,12 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "transparent",
+                "color": "#7a7a7a",
                 "value": null
+              },
+              {
+                "color": "blue",
+                "value": 1
               }
             ]
           }
